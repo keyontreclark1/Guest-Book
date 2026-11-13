@@ -18,12 +18,8 @@ const requiredEnvironment = [
   'GITHUB_CLIENT_ID',
   'GITHUB_CLIENT_SECRET',
 ] as const;
-
-for (const name of requiredEnvironment) {
-  if (!process.env[name]) {
-    throw new Error(`Missing required environment variable: ${name}`);
-  }
-}
+const missingEnvironment = requiredEnvironment.filter((name) => !process.env[name]);
+const isConfigured = missingEnvironment.length === 0;
 
 export const app = express();
 const isProduction = process.env.NODE_ENV === 'production';
@@ -58,57 +54,79 @@ const messageSchema = new mongoose.Schema(
 
 const Message = mongoose.model('Message', messageSchema);
 
-passport.use(
-  new GitHubStrategy(
-    {
-      clientID: process.env.GITHUB_CLIENT_ID!,
-      clientSecret: process.env.GITHUB_CLIENT_SECRET!,
-      callbackURL:
-        process.env.GITHUB_CALLBACK_URL ??
-        'http://localhost:3001/auth/github/callback',
-    },
-    (
-      _accessToken: string,
-      _refreshToken: string,
-      profile: Profile,
-      done: VerifyCallback,
-    ) => {
-      done(null, {
-        id: profile.id,
-        username: profile.username ?? profile.displayName ?? 'GitHub user',
-        avatarUrl: profile.photos?.[0]?.value ?? '',
-      });
-    },
-  ),
-);
-
-passport.serializeUser((user, done) => done(null, user));
-passport.deserializeUser((user: Express.User, done) => done(null, user));
-
-app.use((_req, _res, next) => {
-  void connectDatabase().then(
-    () => next(),
-    (error: unknown) => next(error),
-  );
-});
 app.use(express.json({ limit: '10kb' }));
-app.use(
-  session({
-    name: 'guestbook.sid',
-    secret: process.env.SESSION_SECRET!,
-    resave: false,
-    saveUninitialized: false,
-    store: MongoStore.create({ mongoUrl: process.env.MONGODB_URI! }),
-    cookie: {
-      httpOnly: true,
-      sameSite: 'lax',
-      secure: isProduction,
-      maxAge: 1000 * 60 * 60 * 24 * 14,
-    },
-  }),
-);
-app.use(passport.initialize());
-app.use(passport.session());
+app.use((req, res, next) => {
+  if (!isConfigured && req.path.startsWith('/auth/')) {
+    res.redirect('/?auth=setup');
+    return;
+  }
+  if (!isConfigured && req.path.startsWith('/api/')) {
+    res.status(503).json({
+      error: `Guestbook server is not configured. Set these environment variables: ${missingEnvironment.join(', ')}.`,
+    });
+    return;
+  }
+  next();
+});
+
+if (isConfigured) {
+  const vercelHost =
+    process.env.VERCEL_PROJECT_PRODUCTION_URL ?? process.env.VERCEL_URL;
+  const callbackURL =
+    process.env.GITHUB_CALLBACK_URL ??
+    (vercelHost
+      ? `https://${vercelHost}/auth/github/callback`
+      : 'http://localhost:3001/auth/github/callback');
+
+  passport.use(
+    new GitHubStrategy(
+      {
+        clientID: process.env.GITHUB_CLIENT_ID!,
+        clientSecret: process.env.GITHUB_CLIENT_SECRET!,
+        callbackURL,
+      },
+      (
+        _accessToken: string,
+        _refreshToken: string,
+        profile: Profile,
+        done: VerifyCallback,
+      ) => {
+        done(null, {
+          id: profile.id,
+          username: profile.username ?? profile.displayName ?? 'GitHub user',
+          avatarUrl: profile.photos?.[0]?.value ?? '',
+        });
+      },
+    ),
+  );
+
+  passport.serializeUser((user, done) => done(null, user));
+  passport.deserializeUser((user: Express.User, done) => done(null, user));
+
+  app.use((_req, _res, next) => {
+    void connectDatabase().then(
+      () => next(),
+      (error: unknown) => next(error),
+    );
+  });
+  app.use(
+    session({
+      name: 'guestbook.sid',
+      secret: process.env.SESSION_SECRET!,
+      resave: false,
+      saveUninitialized: false,
+      store: MongoStore.create({ mongoUrl: process.env.MONGODB_URI! }),
+      cookie: {
+        httpOnly: true,
+        sameSite: 'lax',
+        secure: isProduction,
+        maxAge: 1000 * 60 * 60 * 24 * 14,
+      },
+    }),
+  );
+  app.use(passport.initialize());
+  app.use(passport.session());
+}
 
 app.get('/auth/github', (req, res, next) => {
   const state = randomBytes(32).toString('hex');

@@ -21,11 +21,26 @@ interface MessagePage {
 }
 
 async function readJson<T>(response: Response): Promise<T> {
-  const payload = (await response.json()) as T & { error?: string };
-  if (!response.ok) {
-    throw new Error(payload.error ?? 'Something went wrong. Please try again.');
+  const body = await response.text();
+  let payload: (T & { error?: string }) | undefined;
+
+  try {
+    payload = JSON.parse(body) as T & { error?: string };
+  } catch {
+    if (!response.ok) {
+      throw new Error(
+        `The server returned an error (${response.status}). Check the deployment settings and server logs.`,
+      );
+    }
+    throw new Error('The server returned an unreadable response. Please try again.');
   }
-  return payload;
+
+  if (!response.ok) {
+    throw new Error(
+      payload?.error ?? `The server returned an error (${response.status}).`,
+    );
+  }
+  return payload as T;
 }
 
 function GitHubMark() {
@@ -48,6 +63,19 @@ export default function App() {
   const [posting, setPosting] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [error, setError] = useState('');
+
+  useEffect(() => {
+    const authResult = new URLSearchParams(window.location.search).get('auth');
+    if (authResult === 'setup') {
+      setError(
+        'GitHub sign-in is not configured yet. Check the Vercel environment variables.',
+      );
+    } else if (authResult === 'failed') {
+      setError(
+        'GitHub sign-in failed. Check the OAuth callback URL and Vercel server logs.',
+      );
+    }
+  }, []);
 
   useEffect(() => {
     let active = true;
